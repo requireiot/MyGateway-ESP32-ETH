@@ -1,0 +1,3 @@
+[submodule "lib/MySensors"]
+	path = lib/MySensors
+	url = https://github.com/requireiot/MySensors
