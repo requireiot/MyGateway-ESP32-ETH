@@ -6,7 +6,7 @@
  * Created		: 03-Oct-2024
  * Tabsize		: 4
  * 
- * This Revision: $Id: main.cpp 1671 2024-11-17 17:10:08Z  $
+ * This Revision: $Id: main.cpp 1677 2024-11-22 11:19:42Z  $
  */
 
 /*
@@ -35,21 +35,21 @@
 */
 
 //----- some configuration options
-// these are defined in platformio.ini
+// these are defined in platformio.ini, they are specific to each device
 // #define USE_ETHERNET    // use Ethernet with LAN8720 rather than WiFi
 // #define USE_HSPI        // implies MISO=12 MOSI=13 SCK=14 SS=15
 // #define USE_DS18B20     // use temperature sensor
+// #define MY_SEPARATE_PROCESS_TASK // loop() and _process() in separate tasks
 
-// these can be enabled here
+// these can be enabled here, they are common to all devices
 #define USE_SYSLOG      // report to remote syslog server, URL see below
 #define USE_NTP         // get time from time server, URL see below
 #define USE_HTTP        // enable web UI
-//#define USE_ASYNC_WEBSERVER
 #define USE_OTA         // enable over-the-air firmware update
 
-//----- uncomment either of these two
+//----- uncomment either of these two, here or in platformio.ini
 //#define OPERATE_AS_GATEWAY
-#define OPERATE_AS_REPEATER
+//#define OPERATE_AS_REPEATER
 
 //----- the Arduino universe
 #include <Arduino.h>
@@ -67,11 +67,7 @@
  #include <ArduinoOTA.h>         // LGPLv2.1+ license, https://github.com/jandrassy/ArduinoOTA
 #endif
 #ifdef USE_HTTP 
- #ifdef USE_ASYNC_WEBSERVER
-  #include <ESPAsyncWebServer.h>    // LGPLv2.1+ license
- #else
-  #include <WebServer.h>        // LGPLv2.1+ license
- #endif
+ #include <WebServer.h>        // LGPLv2.1+ license
 #endif
 #ifdef USE_DS18B20
  #include <OneWire.h>
@@ -90,6 +86,11 @@
 
 //=====================================================================
 #pragma region configuration
+
+// default to repeater operation, unless specified otherwise above or in platformio.ini)
+#if !defined(OPERATE_AS_GATEWAY) && !defined(OPERATE_AS_REPEATER)
+ #define OPERATE_AS_REPEATER
+#endif
 
 #ifdef USE_ETHERNET
  #define IF_NAME "ETH"
@@ -142,7 +143,7 @@
 #define MY_MQTT_PUBLISH_TOPIC_PREFIX "my/E/stat"
 #define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "my/cmnd"
 
-#define VERSION "$Id: main.cpp 1671 2024-11-17 17:10:08Z  $ " __DATE__ " " __TIME__
+#define VERSION "$Id: main.cpp 1677 2024-11-22 11:19:42Z  $ "
 
 #ifdef LED_BUILTIN
  #define LED_INIT   pinMode(LED_BUILTIN,OUTPUT);
@@ -169,7 +170,7 @@ const unsigned long MIN_REPORT_INTERVAL = 60 MINUTES;
 /// time between temperature measurements
 const unsigned long REPORT_TEMPERATURE_INTERVAL = 30 MINUTES;
 /// time between keepalive messages
-const unsigned long REPORT_HELLO_INTERVAL = 5 MINUTES;
+const unsigned long REPORT_HELLO_INTERVAL = 15 SECONDS; //5 MINUTES;
 
 //---------------------------------------------------------------------
 #pragma endregion
@@ -212,7 +213,7 @@ const unsigned long REPORT_HELLO_INTERVAL = 5 MINUTES;
  #define FRIENDLY_PROJECT_NAME "ESP32 MySensors Gateway"
  #define NODE_ID_AS_SENSOR MY_NODE_ID
  #define MY_GATEWAY_MAX_CLIENTS 2
- #define MY_RF24_CHANNEL 99    // test only
+ //#define MY_RF24_CHANNEL 99    // test only
 #endif
 
 //----- operate as repeater
@@ -253,11 +254,7 @@ WiFiUDP udpClient;
 #endif
 
 #ifdef USE_HTTP 
- #ifdef USE_ASYNC_WEBSERVER
-  AsyncWebServer httpServer(80);
- #else
-  WebServer httpServer(80);
- #endif
+ WebServer httpServer(80);
 #endif
 
 #ifdef USE_DS18B20
@@ -275,16 +272,18 @@ struct RxTxStats_t {
 	unsigned nRx, nTx, nGwRx, nGwTx, nErr;
 } rxtxStats;
 
-/// nMessages[i] counts messages for node id ì`
-unsigned nMessages[256];
+/// nMessagesRx[i] counts messages received from node id `i`
+unsigned nMessagesRx[256];
+/// nMessagesTx[i] counts messages sent to node id `i`
+unsigned nMessagesTx[256];
+/// nRetries[i] counts mretries required for messages sent to node id `i`
+unsigned nRetries[256];
 
 struct ArcStats_t {
     unsigned packets;   ///< number of packets sent
     unsigned retries;   ///< number of retries required
     unsigned success;   ///< success rate in percent
 } arcStats;
-
-time_t t_last_clear = 0;
 
 const char* reset_reasons[] = {
 "0: none",
@@ -306,6 +305,17 @@ const char* reset_reasons[] = {
 "16: RTC Watch dog reset digital core and rtc module"
 };
 
+time_t t_last_clear = 0;
+
+time_t getTimeNow()
+{
+#ifdef USE_NTP
+    return ntpClient.getEpochTime();
+#else
+    return time(nullptr);
+#endif
+}
+
 //---------------------------------------------------------------------
 #pragma endregion
 //=====================================================================
@@ -315,8 +325,10 @@ const char* reset_reasons[] = {
  * @brief Collect statistics re Automatic Retries Count (ARC) for RF24.
  * Call this function immediately after each `send()` call.
  * 
+ * @return int  number of retries required for most recent send
+ * 
  */
-void collectArcStatistics()
+int collectArcStatistics()
 {
 	int rssi = transportHALGetSendingRSSI();	// boils down to (-29 - (8 * (RF24_getObserveTX() & 0xF)))
 	int arc = (-(rssi+29))/8;
@@ -326,6 +338,7 @@ void collectArcStatistics()
         arcStats.packets ? 
             (100uL * arcStats.packets) / (arcStats.packets + arcStats.retries) 
             : 100;
+    return arc;
 }
 
 
@@ -335,10 +348,12 @@ void collectArcStatistics()
  */
 void initStats()
 {
-	memset( nMessages, 0, sizeof(nMessages));
+	memset( nMessagesRx, 0, sizeof(nMessagesRx));
+	memset( nMessagesTx, 0, sizeof(nMessagesTx));
+	memset( nRetries, 0, sizeof(nRetries));
 	memset( &rxtxStats, 0, sizeof(rxtxStats) );
     memset( &arcStats, 0, sizeof arcStats );
-    t_last_clear = time(nullptr);
+    t_last_clear = getTimeNow();
 }
 
 
@@ -364,8 +379,8 @@ const char* reportArcStatistics()
 
     //memset( &arcStats, 0, sizeof arcStats );
 	arcMessage.setSensor(SENSOR_ID_ARC).setType(V_TYPE_ARC);
-	send(arcMessage.set(payload));
-    collectArcStatistics();
+	delay(10);
+    send(arcMessage.set(payload));
 	return payload;
 }
 
@@ -418,21 +433,34 @@ void setupOTA()
 
 #ifdef USE_HTTP 
 
-#ifdef OPERATE_AS_REPEATER
-const char index_html[] PROGMEM = R"rawliteral(
+const char common_header_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <title>%TITLE%</title>
   <style>
-    body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; line-height: 1.05; }
+    body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; line-height: 1.1; }
     table { border-collapse: collapse; }
     td { text-align: right; border: 1px solid #777777; padding: 4px; }
     button { margin: 5px; padding:10px; min-height:20px; min-width: 80px; float:left; }
     .mph { color: #606060; font-size:smaller; }
+    .suc { color: #fc03fc; font-size:smaller; }
   </style>
 </head>
 <body>
   <h2>%TITLE%</h2>
+)rawliteral";
+
+
+const char common_footer_html[] PROGMEM = R"rawliteral(
+  <form action="/clear"><button type="submit">Clear</button></form>
+  <form action="/reboot"><button type="submit">Restart</button></form>
+</body>
+</html>
+)rawliteral";
+
+
+#ifdef OPERATE_AS_REPEATER
+const char index_body_html[] PROGMEM = R"rawliteral(
   <p>
     IP:<b>%IPADDR%</b>&ensp;
     Name:<b>%HOSTNAME%</b>&ensp;
@@ -441,48 +469,39 @@ const char index_html[] PROGMEM = R"rawliteral(
     Power:<b>%POWER%</b>
   </p>  
   <p>
-    ARC <b>%SUCCESS%</b>%% success,&ensp;<b>%PACKETS%</b> packets,&ensp;<b>%RETRIES%</b> retries.&emsp;
+    ARC <b>%SUCCESS%</b>%% success, <b>%PACKETS%</b> packets, <b>%RETRIES%</b> retries.&emsp;
   </p>
   <p>
-    Node: rx:<b>%NRX%</b>&emsp;tx:<b>%NTX%</b>&emsp;err:<b>%NERR%</b>&emsp;
-    Time: %NOW%
+    Node rx:<b>%NRX%</b>&ensp;tx:<b>%NTX%</b>&ensp;err:<b>%NERR%</b>&ensp;
+  </p>
+  <p>
+    since %LASTCLEAR% (%ELAPSED%)&emsp;
+    time is now %NOW%
   </p>
   <p>%TABLE%</p>
-  <p>
-   <form action="/clear"><button type="submit">Clear</button></form>
-   <form action="/reboot"><button type="submit">Restart</button></form>
-  </p>
-</body>
-</html>
 )rawliteral";
 #endif // OPERATE_AS_REPEATER
 
 #ifdef OPERATE_AS_GATEWAY
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
-<head>
-  <title>%TITLE%</title>
-  <style>
-    body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }
-    table { border-collapse: collapse; }
-    td { text-align: right; border: 1px solid #777777; padding: 4px; }
-    button { margin: 5px; padding:10px; min-height:20px; min-width: 80px; float:left; }
-    .mph { color: #606060; font-size:smaller; }
-  </style>
-</head>
-<body>
-  <h2>%TITLE%</h2>
-  <p>IP:<b>%IPADDR%</b>&emsp;Name:<b>%HOSTNAME%</b></p>  
+const char index_body_html[] PROGMEM = R"rawliteral(
   <p>
-    Node: rx:<b>%NRX%</b>&emsp;tx:<b>%NTX%</b>&emsp;err:<b>%NERR%</b><br/>
-    Gateway: rx:<b>%NGWRX%</b>&emsp;tx:<b>%NGWTX%</b>
+    IP: <b>%IPADDR%</b>&emsp;
+    Name: <b>%HOSTNAME%</b>&emsp;
+    Power: <b>%POWER%</b>&emsp;
+    Channel: <b>%CHANNEL%</b>
+  </p>  
+  <p>
+    ARC <b>%SUCCESS%</b>%% success, <b>%PACKETS%</b> packets, <b>%RETRIES%</b> retries.&emsp;
+  </p>
+  <p>
+    Node: rx:<b>%NRX%</b>&ensp;tx:<b>%NTX%</b>&ensp;err:<b>%NERR%</b><br/>
+    Gateway: rx:<b>%NGWRX%</b>&ensp;tx:<b>%NGWTX%</b>
+  </p>
+  <p>
+    since %LASTCLEAR% (%ELAPSED%)&emsp;
+    time is now %NOW%
   </p>
   <p>%TABLE%</p>
-  <form action="/clear"><button type="submit">Clear</button></form>
-  <form action="/reboot"><button type="submit">Restart</button></form>
-  <p>%NOW%</p>
-</body>
-</html>
 )rawliteral";
 #endif // OPERATE_AS_GATEWAY
 
@@ -508,18 +527,25 @@ String utos( unsigned u )
  */
 String make_table_row(unsigned y, time_t nSecsElapsed)
 {
-    unsigned x, totalMsgs, MsgsPerHour;
+    unsigned x, totalMsgsRx, MsgsPerHour, totalMsgsTx, totalRetries, success;
 
     String s = "<tr><th>" + utos(y) + ":</td>";
     for (x=0; x<10; x++) {
-        totalMsgs = nMessages[y + x];
+
+        totalMsgsRx = nMessagesRx[y + x];
         if (nSecsElapsed)
-            MsgsPerHour = (totalMsgs * 3600uL) / nSecsElapsed;
+            MsgsPerHour = (totalMsgsRx * 3600uL) / nSecsElapsed;
         s += "<td>";
-        if (totalMsgs > 0) {
-            s += "<b>" + utos(totalMsgs) + "</b>";
+        if (totalMsgsRx > 0) {
+            s += "<b>" + utos(totalMsgsRx) + "</b>";
             if (nSecsElapsed)
                 s += "&ensp;<span class='mph'>" + utos(MsgsPerHour) + "/h</span>";
+        }
+        totalMsgsTx = nMessagesTx[y+x];
+        if (totalMsgsTx > 0) {
+            totalRetries = nRetries[y+x];
+            success = (100 * totalMsgsTx) / (totalMsgsTx + totalRetries);
+            s += "<br/><span class='suc'>" + utos(success) + "%</span>";
         }
         s += "</td>";
     }
@@ -537,7 +563,7 @@ String make_table()
 {
     String s;
     unsigned x,y;
-    time_t nSecsElapsed = time(nullptr) - t_last_clear;
+    time_t nSecsElapsed = getTimeNow() - t_last_clear;
 
     s = "<table><tr><th> </th>";
     for (x=0; x<10; x++) s += "<th>&ensp;+" + utos(x) + "</th>";
@@ -570,6 +596,7 @@ String processor(const String& var)
     if (var=="PARENT") return String(transportGetParentNodeId());
     //----- configuration
     if (var=="POWER") return String(MY_RF24_PA_LEVEL);
+    if (var=="CHANNEL") return String(MY_RF24_CHANNEL);
 
     //-----indication-based counts
     if (var=="NRX") return String(rxtxStats.nRx);
@@ -581,15 +608,21 @@ String processor(const String& var)
     if (var=="PACKETS") return String(arcStats.packets);
     if (var=="RETRIES") return String(arcStats.retries);
     if (var=="SUCCESS") return String(arcStats.success);
+    if (var=="LASTCLEAR") {
+        strftime(msgbuf, sizeof msgbuf, "%d.%m.%Y %H:%M:%S", localtime(&t_last_clear));
+        return String(msgbuf);
+    }
+    if (var=="ELAPSED") {
+        time_t t_elapsed = getTimeNow() - t_last_clear; // in seconds
+        tm* te = gmtime(&t_elapsed);
+        snprintf(msgbuf,sizeof msgbuf, "%dd %dh %dm", te->tm_yday, te->tm_hour, te->tm_min);
+        return String(msgbuf);
+    }
 
     //----- general information
     if (var=="TITLE") return FRIENDLY_PROJECT_NAME ;
     if (var=="NOW") {
-#ifdef USE_NTP
-    	time_t epoch = ntpClient.getEpochTime();
-#else
-        time_t epoch = time(nullptr);
-#endif
+        time_t epoch = getTimeNow();
         strftime(msgbuf, sizeof msgbuf, "%d.%m.%Y %H:%M:%S", localtime(&epoch));
         return String(msgbuf);
     }
@@ -610,7 +643,6 @@ String processor(const String& var)
  */
 static String process( const String& tpl )
 {
-    //Serial.printf("From:\n%s\n",tpl.c_str());
     String res = "";
     int p1,p2;
 
@@ -626,43 +658,21 @@ static String process( const String& tpl )
         p2++;
     }
     res += tpl.substring(p2);
-    //Serial.printf("To:\n%s\n",res.c_str());
     return res;
 }
 
 
- #ifdef USE_ASYNC_WEBSERVER
-  void setupHTTPServer()
-  {
-    // Route for root / web page
-    httpServer.on( "/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        log_i("HTTP '/'");
-        request->send_P(200, "text/html", index_html, processor);
-    });
-    httpServer.on("/clear", HTTP_GET, [] (AsyncWebServerRequest *request) {
-        log_i("HTTP '/clear'");
-        initStats();
-        request->redirect("/");
-    });
-    httpServer.on("/reboot", HTTP_GET, [] (AsyncWebServerRequest *request) {
-        log_i("HTTP '/reboot'");
-        request->redirect("/");
-        ESP.restart();
-    });
-    httpServer.onNotFound( [] (AsyncWebServerRequest *request) {
-        log_e("HTTP not found");
-        request->send(404, "text/plain", "not found");
-    });
-    // Start server
-    httpServer.begin();
-  }
- #else // USE_ASYNC_WEBSERVER
-  void setupHTTPServer()
-  {
+ void setupHTTPServer()
+ {
     // Route for root / web page
     httpServer.on( "/", HTTP_GET, []() {
         log_i("HTTP '/'");
-        httpServer.send(200, "text/html", process(index_html));
+        String html = 
+            String(common_header_html) 
+            + String(index_body_html) 
+            + String(common_footer_html);
+        //Serial.println(html);
+        httpServer.send(200, "text/html", process(html));
     });
     httpServer.on("/clear", HTTP_GET, [] () {
         log_i("HTTP '/clear'");
@@ -682,8 +692,7 @@ static String process( const String& tpl )
     });
     // Start server
     httpServer.begin();
-  }
- #endif // USE_ASYNC_WEBSERVER
+ }
 #endif // USE_HTTP
 
 //---------------------------------------------------------------------
@@ -754,24 +763,20 @@ void WiFiEvent(WiFiEvent_t event)
  */
 void presentation()
 {
-	static char rev[] = "$Rev: 1671 $";
+	static char rev[] = "$Rev: 1677 $";
 	char* p = strchr(rev+6,'$');
 	if (p) *p=0;
 
 	// Present locally attached sensors here
 	sendSketchInfo( "MyGwESP32-ETH", rev+6 );
-    collectArcStatistics();
 	//              				    1...5...10...15...20...25 max payload
 	//				                    |   |    |    |    |    |
 	present(SENSOR_ID_ARC, S_CUSTOM, F("ARC stats (JSON)") );
-	collectArcStatistics();    
     delay(10);
     present(SENSOR_ID_CMND, S_INFO, F("Commands"));
-	collectArcStatistics();    
     delay(10);
 #ifdef USE_DS18B20
 	present( SENSOR_ID_TEMP, S_TEMP, F("Temperature [°C]" ));
-    collectArcStatistics();
 #endif
 }
 
@@ -803,35 +808,33 @@ void indication( const indication_t ind )
  */
 void receive(const MyMessage &message)
 {
-	char buf[32];
-
+/*
 #ifdef OPERATE_AS_GATEWAY
-	nMessages[ message.getSender() ]++;
+	nMessagesRx[ message.getSender() ]++;
 #endif
-
+*/
 	// We only expect one type of message from controller. But we better check anyway.
 	if (message.isAck()) {
-		//Serial.println("Ack from gateway");
 		return;
 	}
-
-    Serial.printf("Msg Type:%d Sensor:%d Payload:%s\n",
-		message.type,message.sensor,message.getString());
+    const char* payload = message.getString();
+    log_i("Msg Type:%d Sensor:%d Payload:'%s'",
+		message.type, message.sensor, payload ? payload : "(none)");
 
 	if (										// MQTT: my/cmnd/25/96/1/0/47   text
 		message.sensor == SENSOR_ID_CMND && 
 		message.type == V_TEXT 
 		) {
 		// parse command
-        Serial.printf("Execute command '%s'\n",message.getString());
+        log_i("Execute command '%s'", payload ? payload : "(none)");
 
 	} else {
-        Serial.println("unknown message\r\n");
+        log_e("unknown message");
     }
 }
 
 
-#ifdef OPERATE_AS_REPEATER
+//#ifdef OPERATE_AS_REPEATER
 /**
  * @brief Let user code peek at incoming message _before_ it is forwarded to parent.
  * Defined in my modified MySensors library, as a "weak" function, i.e. the library 
@@ -841,23 +844,25 @@ void receive(const MyMessage &message)
  */
  void previewMessage(const MyMessage &message) 
  {
-	nMessages[ message.getSender() ]++;
+	nMessagesRx[ message.getSender() ]++;
  }
+
+//#endif
 
 
 /**
- * @brief Let user code peek at message _after_ it has been forwarded to parent.
- * Defined in my modified MySensors library, as a "weak" function, i.e. the library 
- * will call this if it is defined in user code, or else quietly ignore it.
+ * @brief Called immdiately after a message has been sent, so we can do ARC statistics
  * 
- * @param message 
+ * @param nextRecipient     the immediate destination node id, may be final destination or repeater
+ * @param message           reference to the message being sent
  */
- void afterTransportMessage(const MyMessage &message)
- {
-    collectArcStatistics();
- }
+void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message) 
+{
+    int arc = collectArcStatistics();
+    nMessagesTx[ nextRecipient ]++;
+    nRetries[ nextRecipient ] += arc;
+}
 
-#endif
 
 //---------------------------------------------------------------------
 #pragma endregion
@@ -897,7 +902,6 @@ void reportTemperature()
         if (int(t) == 85) return;
         ds18b20.requestTemperatures();
         send(msgTemperature.set(t,1));
-        collectArcStatistics();
         Serial.printf("Temperature " ANSI_BOLD "%.1f" ANSI_RESET "°C\n",t);
     }
 }
@@ -960,15 +964,13 @@ void setup()
 {
     int rtc_reset_reason = rtc_get_reset_reason(0);    
 
-//----- Telnet
-
 	Serial.println("---------- begin setup()");
-    Serial.println(FRIENDLY_PROJECT_NAME " " SVN_REV);
-    Serial.println(VERSION);
+    Serial.println(FRIENDLY_PROJECT_NAME " svn:" SVN_REV);
+    Serial.println(VERSION "compiled " __DATE__ " " __TIME__);
     Serial.printf("Reset reason %s\n",reset_reasons[rtc_reset_reason]);
 
 //----- report environment
-
+      
     Serial.printf( ANSI_BOLD "%s" ANSI_RESET, 
         ESP.getChipModel() );
     Serial.printf(" at " ANSI_BOLD "%d" ANSI_RESET " MHz",
@@ -1005,17 +1007,8 @@ void setup()
 #else
     sConfig += "1 task, ";
 #endif
-#ifdef USE_ASYNC_WEBSERVER
-    sConfig += "async webserver, ";
-#else
-    sConfig += "normal webserver, ";
-#endif
 
     Serial.println( sConfig );
-
-//----- locally attached sensors
-
-    initStats();
 
 //----- Ethernet
 
@@ -1041,12 +1034,22 @@ void setup()
 #ifdef USE_SYSLOG
     syslog.logMask(LOG_UPTO(LOG_INFO));
     syslog.deviceHostname(ETH.getHostname());
+    log_i("initialized Syslog");
+
     syslog.logf(LOG_NOTICE,"Starting %s, reset reason '%s'", 
         FRIENDLY_PROJECT_NAME, reset_reasons[rtc_reset_reason] );
-	syslog.log(LOG_NOTICE, VERSION );
+	syslog.log(LOG_NOTICE, VERSION " " SVN_REV " compiled " __DATE__ " " __TIME__ );
 	syslog.log(LOG_NOTICE, sNetwork );
     syslog.log( LOG_NOTICE, sConfig );
-    log_i("initialized Syslog");
+    snprintf( msgbuf, sizeof msgbuf, 
+        "Chip:%s F:%uMHz Flash:%uK Heap:%u Core:%s",
+        ESP.getChipModel(),
+        ESP.getCpuFreqMHz(),
+        ESP.getFlashChipSize() / 1024,
+        ESP.getFreeHeap(),
+        ESP.getSdkVersion()
+        );
+    syslog.log(LOG_NOTICE,msgbuf);
 #endif
 
 //----- Webserver
@@ -1063,6 +1066,10 @@ void setup()
     log_i("initialized OTA");
 #endif
 
+//----- locally attached sensors
+
+    initStats();
+
 //----- Temperature sensor
 
 #ifdef USE_DS18B20
@@ -1075,31 +1082,17 @@ void setup()
 
     const char* arc = reportArcStatistics();
     log_i("ARC: %s",arc);
-#ifdef USE_SYSLOG
-    syslog.logf(LOG_NOTICE,"ARC: %s", arc );
-#endif
 
 	Serial.println("---------- end setup()");
     Serial.flush();
-
-/*
-    esp_pm_config_esp32_t cfg;
-    int err = esp_pm_get_configuration(&cfg);
-    if (err==ESP_OK)
-        Serial.printf("ESP32 PM: max=%d min=%d light sleep %s\n",
-            cfg.max_freq_mhz,
-            cfg.min_freq_mhz,
-            cfg.light_sleep_enable ? "ON" : "OFF"
-        );
-*/
 }
 
 
 void loop() 
 {
     unsigned long t_now = millis();
-    
-#if defined( USE_HTTP) && !defined(USE_ASYNC_WEBSERVER)
+ 
+#if defined( USE_HTTP) 
     httpServer.handleClient();
 #endif
 
@@ -1108,7 +1101,7 @@ void loop()
 #endif
 
 #ifdef USE_NTP
-    ntpClient.update();    
+    ntpClient.update();
 #endif
 
 #ifdef USE_DS18B20
@@ -1125,7 +1118,6 @@ void loop()
 	if ((unsigned long)(t_now - t_lastHelloReport) > REPORT_HELLO_INTERVAL) {
 		t_lastHelloReport=t_now;
         send(msgHello.set((uint32_t)t_now));
-        collectArcStatistics();
         Serial.println(reportArcStatistics());
     }
 #endif
