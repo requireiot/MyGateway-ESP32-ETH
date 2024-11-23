@@ -7,13 +7,12 @@ MySensors Ethernet Gateway with ESP32
   - [Building the Ethernet ESP32 gateway](#building-the-ethernet-esp32-gateway)
     - [Development environment](#development-environment)
     - [Installation](#installation)
-    - [Modifications to the MySensors library](#modifications-to-the-mysensors-library)
-      - [ESP32 gateway via Ethernet](#esp32-gateway-via-ethernet)
-      - [Separate tasks for `loop()` and `_process()`](#separate-tasks-for-loop-and-_process)
-      - [new notification functions](#new-notification-functions)
-    - [Ethernet initialization in the main app](#ethernet-initialization-in-the-main-app)
-    - [Connecting the RF24 radio module](#connecting-the-rf24-radio-module)
     - [Hardware](#hardware)
+  - [Modifications to the MySensors library](#modifications-to-the-mysensors-library)
+    - [ESP32 gateway via Ethernet](#esp32-gateway-via-ethernet)
+    - [Separate tasks for `loop()` and `_process()`](#separate-tasks-for-loop-and-_process)
+    - [Connecting the RF24 radio module](#connecting-the-rf24-radio-module)
+    - [New notification functions](#new-notification-functions)
 
 
 ## Objective
@@ -83,67 +82,6 @@ I don't use the Arduino IDE.
 5. near the start of `src/main.cpp`, look for the section that starts with 
    `#pragma region configuration` and adjust parameters as needed, e.g. the URL of your syslog server (if you have one), the URL of the MQTT broker, etc.
 
-### Modifications to the MySensors library
-
-#### ESP32 gateway via Ethernet
-The MySensors library (version 2.3.2) already contains provisions for an ESP32 based 
-gateway, just `#define MY_GATEWAY_ESP32`, and off you go, they even provide an 
-[example sketch](https://www.mysensors.org/apidocs/GatewayESP32_8ino_source.html). 
-However ... this assumes that the network connection will be via _WiFi_, there is 
-no support for a wired Ethernet connection, as far as I can tell.
-
-With my modified version of the MySensors library (included in this repository), 
-you either `#define MY_GATEWAY_ESP32_WIFI`, and you get the same behavior as in 
-the original, or you `#define MY_GATEWAY_ESP32_ETHERNET` to support a LAN8720 based 
-Ethernet interface.
-
-#### Separate tasks for `loop()` and `_process()`
-There are two functions that get called repeatedly during normal operation:
-* the Arduino  `loop()` function, which handles all the features implemented by the application
-* the MySensors `_process()` function, which handles RF24 communication ... which 
- normally gets called "invisibly" by the MySensors framework
-
-I got the impression that the gateway or repeater runs more reliably (especially 
-at lower CPU clock frequencies) if the two functions run in separate tasks, 
-so extended calculations or waiting operations in `loop()` won't interfere with 
-the regular polling for incoming RF24 packets. 
-
-With my modification to the MySensors library included here, they run in separate 
-tasks if the `MY_SEPARATE_PROCESS_TASK` preprocessor macro is defined, e.g. in 
-the `platformio.ini` file. Note that both tasks run on the same ESP32 core, the 
-other core remains dedicated to networking stuff.
-
-When using separate tasks, the repeater or gateway will work reliably down to 40 MHz CPU frequency (using Ethernet) or 80 MHz (using WiFi).
-
-#### new notification functions
-To enable the statistics display, my code must be notified imediately after a message has been received (so I can count incoming messages), and after a message has been sent (so I can count them, and ask about the number of retries required to successfully deliver the message).
-
-Function `void previewMessage(const MyMessage &message)` is called by the modified MySensors library right after a message has been received.
-
-Function `void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message)` is called by the modified MySensors library right after a message has been sent.
-
-Both functions are declared in the library with the `weak` attribute, i.e. they are called if they are defined in the application code, and nothing happens if they are not defined in the application code.
-
-### Ethernet initialization in the main app
-
-The Ethernet interface must be initialized in _application_ code, ideally before the MySensors stuff runs. A good place for this is the `preHwInit()` function declared by MySensors as a "weak" function, i.e. it is called early during startup if the function is defined in your code, but no error is thrown if you don't define a function with this name. See the source code for more details.
-
-### Connecting the RF24 radio module
-
-Using the ESP32 Ethernet interface also affects how the NRF24 radio module can be 
-connected. You can't use the default SPI port with its default pins on the ESP32, 
-because some of those pins are occupied by the Ethernet interface, which, unlike 
-other peripherals of the ESP like I2C or SPI, can't have its signals remapped to 
-pins of your choice.
-
-Instead of using the default SPI port, a.k.a. SPI3 or SPI(VSPI), we use the "other" 
-SPI available on the ESP32, a.k.a. SPI2 or SPI(HSPI). Before you `#include <MySensors.h>`, just say
-```
- SPIClass hspi(HSPI);   
- #define RF24_SPI hspi
-```
-This implies pins MISO=12, MOSI=13, SCK=14, CS=15. I also modified the MySensors library so you can `#define` macros named `MY_RF24_MISO_PIN`, `MY_RF24_MOSI_PIN`, `MY_RF24_SCK_PIN` and `MY_RF24_CS_PIN`, and the SPI interface will use those custom pins if those macros are defined in user code.
-
 ### Hardware
 
 Schematics are [here](hardware/MyRepeater-ESP32-ETH.pdf). I didn't design 
@@ -161,3 +99,76 @@ board, placed in a wall wart housing (Reichelt P/N SSG 200 SK-I).
 
 <img src="pictures/wall-wart-1.jpg" height="300px"/>
 <img src="pictures/wall-wart-2.jpg" height="300px"/>
+
+## Modifications to the MySensors library
+
+### ESP32 gateway via Ethernet
+The MySensors library (version 2.3.2) already contains provisions for an ESP32 based 
+gateway, just `#define MY_GATEWAY_ESP32`, and off you go, they even provide an 
+[example sketch](https://www.mysensors.org/apidocs/GatewayESP32_8ino_source.html). 
+However ... this assumes that the network connection will be via _WiFi_, there is 
+no support for a wired Ethernet connection, as far as I can tell.
+
+With my modified version of the MySensors library (included in this repository), 
+you either `#define MY_GATEWAY_ESP32_WIFI`, and you get the same behavior as in 
+the original, or you `#define MY_GATEWAY_ESP32_ETHERNET` to support a LAN8720 based 
+Ethernet interface.
+
+The Ethernet interface must be initialized in _application_ code, ideally before 
+the MySensors stuff runs. A good place for this is the `preHwInit()` function 
+declared by MySensors as a "weak" function, i.e. it is called early during startup 
+if the function is defined in your code, but no error is thrown if you don't define 
+a function with this name. See the source code for more details.
+
+### Separate tasks for `loop()` and `_process()`
+There are two functions that get called repeatedly during normal operation:
+* the Arduino  `loop()` function, which handles all the features implemented by the application
+* the MySensors `_process()` function, which handles RF24 communication ... which 
+ normally gets called "invisibly" by the MySensors framework
+
+I got the impression that the gateway or repeater runs more reliably (especially 
+at lower CPU clock frequencies) if the two functions run in separate tasks, 
+so extended calculations or waiting operations in `loop()` won't interfere with 
+the regular polling for incoming RF24 packets. 
+
+With my modification to the MySensors library included here, they run in separate 
+tasks if the `MY_SEPARATE_PROCESS_TASK` preprocessor macro is defined, e.g. in 
+the `platformio.ini` file. Note that both tasks run on the same ESP32 core, the 
+other core remains dedicated to networking stuff.
+
+When using separate tasks, the repeater or gateway will work reliably down to 40 MHz CPU frequency (using Ethernet) or 80 MHz (using WiFi).
+
+### Connecting the RF24 radio module
+
+Using the ESP32 Ethernet interface also affects how the NRF24 radio module can be 
+connected. You can't use the default SPI port with its default pins on the ESP32, 
+because some of those pins are occupied by the Ethernet interface, which, unlike 
+other peripherals of the ESP like I2C or SPI, can't have its signals remapped to 
+pins of your choice.
+
+Instead of using the default SPI port, a.k.a. SPI3 or SPI(VSPI), we use the "other" 
+SPI available on the ESP32, a.k.a. SPI2 or SPI(HSPI). Before you `#include <MySensors.h>`, just say
+```
+ SPIClass hspi(HSPI);   
+ #define RF24_SPI hspi
+```
+This implies pins MISO=12, MOSI=13, SCK=14, CS=15. I also modified the MySensors 
+library so you can `#define` macros named `MY_RF24_MISO_PIN`, `MY_RF24_MOSI_PIN`, 
+`MY_RF24_SCK_PIN` and `MY_RF24_CS_PIN`, and the SPI interface will use those custom 
+pins if those macros are defined in user code.
+
+### New notification functions
+To enable the statistics display, my code must be notified imediately after a message 
+has been received (so I can count incoming messages), and after a message has been sent 
+(so I can count them, and ask about the number of retries required to successfully 
+deliver the message).
+
+Function `void previewMessage(const MyMessage &message)` is called by the modified 
+MySensors library right after a message has been received.
+
+Function `void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message)` 
+is called by the modified MySensors library right after a message has been sent.
+
+Both functions are declared in the library with the `weak` attribute, i.e. they are 
+called if they are defined in the application code, and nothing happens if they are 
+not defined in the application code.
