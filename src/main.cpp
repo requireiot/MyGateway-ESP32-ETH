@@ -6,7 +6,7 @@
  * Created		: 03-Oct-2024
  * Tabsize		: 4
  * 
- * This Revision: $Id: main.cpp 1677 2024-11-22 11:19:42Z  $
+ * This Revision: $Id: main.cpp 1678 2024-11-22 16:53:04Z  $
  */
 
 /*
@@ -143,7 +143,7 @@
 #define MY_MQTT_PUBLISH_TOPIC_PREFIX "my/E/stat"
 #define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "my/cmnd"
 
-#define VERSION "$Id: main.cpp 1677 2024-11-22 11:19:42Z  $ "
+#define VERSION "$Id: main.cpp 1678 2024-11-22 16:53:04Z  $ "
 
 #ifdef LED_BUILTIN
  #define LED_INIT   pinMode(LED_BUILTIN,OUTPUT);
@@ -170,7 +170,7 @@ const unsigned long MIN_REPORT_INTERVAL = 60 MINUTES;
 /// time between temperature measurements
 const unsigned long REPORT_TEMPERATURE_INTERVAL = 30 MINUTES;
 /// time between keepalive messages
-const unsigned long REPORT_HELLO_INTERVAL = 15 SECONDS; //5 MINUTES;
+const unsigned long REPORT_HELLO_INTERVAL = 5 MINUTES;
 
 //---------------------------------------------------------------------
 #pragma endregion
@@ -763,7 +763,7 @@ void WiFiEvent(WiFiEvent_t event)
  */
 void presentation()
 {
-	static char rev[] = "$Rev: 1677 $";
+	static char rev[] = "$Rev: 1678 $";
 	char* p = strchr(rev+6,'$');
 	if (p) *p=0;
 

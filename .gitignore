@@ -8,3 +8,4 @@ hardware/MyRepeater-ESP32-ETH-backups
 test
 datasheets
 src/secrets.h
+include/Revision.h

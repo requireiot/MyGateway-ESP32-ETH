@@ -150,8 +150,8 @@ Schematics are [here](hardware/MyRepeater-ESP32-ETH.pdf). I didn't design
 a PCB, just built the Ethernet version on a prototype board with an ESP32 module 
 footprint (called "_7x9cm Prototype PCB For ESP8266 ESP32_" on Aliexpress).
 
-<img src="pictures/box.jpg" height="400px"/> 
-<img src="pictures/top.jpg" height="400px"/>
+<img src="pictures/box-Q.jpg" height="250px"/> 
+<img src="pictures/top-Q.jpg" height="250px"/>
 
 The gateway sits next to a Fritzbox 7490 router/DSL modem, connected by a short 
 Ethernet cable, and powered from one of the USB ports of the router.
