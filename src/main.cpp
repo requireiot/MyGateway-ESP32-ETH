@@ -6,7 +6,7 @@
  * Created		: 03-Oct-2024
  * Tabsize		: 4
  * 
- * This Revision: $Id: main.cpp 1678 2024-11-22 16:53:04Z  $
+ * This Revision: $Id: main.cpp 1681 2024-11-24 15:59:07Z  $
  */
 
 /*
@@ -143,7 +143,7 @@
 #define MY_MQTT_PUBLISH_TOPIC_PREFIX "my/E/stat"
 #define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "my/cmnd"
 
-#define VERSION "$Id: main.cpp 1678 2024-11-22 16:53:04Z  $ "
+#define VERSION "$Id: main.cpp 1681 2024-11-24 15:59:07Z  $ "
 
 #ifdef LED_BUILTIN
  #define LED_INIT   pinMode(LED_BUILTIN,OUTPUT);
@@ -433,7 +433,8 @@ void setupOTA()
 
 #ifdef USE_HTTP 
 
-const char common_header_html[] PROGMEM = R"rawliteral(
+
+const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <title>%TITLE%</title>
@@ -448,10 +449,42 @@ const char common_header_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <h2>%TITLE%</h2>
-)rawliteral";
+  <p>
+    IP:<b>%IPADDR%</b>&emsp;
+    Name:<b>%HOSTNAME%</b>&emsp;
+    Channel:<b>%CHANNEL%</b>&emsp;
+    Power:<b>%POWER%</b>&emsp;
+)rawliteral"
 
+#ifdef OPERATE_AS_REPEATER
+ R"rawliteral(
+    Node:<b>%NODEID%</b>&emsp;
+    Parent:<b>%PARENT%</b>&emsp;
+ )rawliteral"
+#endif
 
-const char common_footer_html[] PROGMEM = R"rawliteral(
+R"rawliteral(
+  </p>  
+  <p>
+    ARC <b>%SUCCESS%</b>%% success, <b>%PACKETS%</b> packets, <b>%RETRIES%</b> retries.&emsp;
+  </p>
+  <p>
+    Node rx:<b>%NRX%</b>&ensp;tx:<b>%NTX%</b>&ensp;err:<b>%NERR%</b> (<b>%ERROR_RATE%</b>%%)&emsp;
+)rawliteral"
+
+#ifdef OPERATE_AS_GATEWAY
+ R"rawliteral(
+    Gateway: rx:<b>%NGWRX%</b>&ensp;tx:<b>%NGWTX%</b>
+ )rawliteral"
+#endif
+
+R"rawliteral(
+  </p>
+  <p>
+    since %LASTCLEAR% (%ELAPSED%)&emsp;
+    time is now %NOW%
+  </p>
+  <p>%TABLE%</p>
   <form action="/clear"><button type="submit">Clear</button></form>
   <form action="/reboot"><button type="submit">Restart</button></form>
 </body>
@@ -459,57 +492,8 @@ const char common_footer_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 
-#ifdef OPERATE_AS_REPEATER
-const char index_body_html[] PROGMEM = R"rawliteral(
-  <p>
-    IP:<b>%IPADDR%</b>&ensp;
-    Name:<b>%HOSTNAME%</b>&ensp;
-    Node:<b>%NODEID%</b>&ensp;
-    Parent:<b>%PARENT%</b>&ensp;
-    Power:<b>%POWER%</b>
-  </p>  
-  <p>
-    ARC <b>%SUCCESS%</b>%% success, <b>%PACKETS%</b> packets, <b>%RETRIES%</b> retries.&emsp;
-  </p>
-  <p>
-    Node rx:<b>%NRX%</b>&ensp;tx:<b>%NTX%</b>&ensp;err:<b>%NERR%</b>&ensp;
-  </p>
-  <p>
-    since %LASTCLEAR% (%ELAPSED%)&emsp;
-    time is now %NOW%
-  </p>
-  <p>%TABLE%</p>
-)rawliteral";
-#endif // OPERATE_AS_REPEATER
-
-#ifdef OPERATE_AS_GATEWAY
-const char index_body_html[] PROGMEM = R"rawliteral(
-  <p>
-    IP: <b>%IPADDR%</b>&emsp;
-    Name: <b>%HOSTNAME%</b>&emsp;
-    Power: <b>%POWER%</b>&emsp;
-    Channel: <b>%CHANNEL%</b>
-  </p>  
-  <p>
-    ARC <b>%SUCCESS%</b>%% success, <b>%PACKETS%</b> packets, <b>%RETRIES%</b> retries.&emsp;
-  </p>
-  <p>
-    Node: rx:<b>%NRX%</b>&ensp;tx:<b>%NTX%</b>&ensp;err:<b>%NERR%</b><br/>
-    Gateway: rx:<b>%NGWRX%</b>&ensp;tx:<b>%NGWTX%</b>
-  </p>
-  <p>
-    since %LASTCLEAR% (%ELAPSED%)&emsp;
-    time is now %NOW%
-  </p>
-  <p>%TABLE%</p>
-)rawliteral";
-#endif // OPERATE_AS_GATEWAY
-
 /**
  * @brief Convert unsigned int to string
- * 
- * @param u 
- * @return String 
  */
 String utos( unsigned u )
 {
@@ -599,15 +583,31 @@ String processor(const String& var)
     if (var=="CHANNEL") return String(MY_RF24_CHANNEL);
 
     //-----indication-based counts
+    // # of messages received via network
     if (var=="NRX") return String(rxtxStats.nRx);
+    // # of messages sent via network
     if (var=="NTX") return String(rxtxStats.nTx);
-    if (var=="NGWRX") return String(rxtxStats.nGwRx);
-    if (var=="NGWTX") return String(rxtxStats.nGwTx);
+    // # of messages failed to send via network
     if (var=="NERR") return String(rxtxStats.nErr);
+    // # of messages received from controller, as gateway
+    if (var=="NGWRX") return String(rxtxStats.nGwRx);
+    // # of messages sent to controller, as gateway
+    if (var=="NGWTX") return String(rxtxStats.nGwTx);
+    // percentage of messages attempted to send that could not be sent
+    if (var=="ERROR_RATE") return String( rxtxStats.nTx ? (100 * rxtxStats.nErr)/rxtxStats.nTx : 0 );
+
     //----- ARC statistics
     if (var=="PACKETS") return String(arcStats.packets);
     if (var=="RETRIES") return String(arcStats.retries);
     if (var=="SUCCESS") return String(arcStats.success);
+
+    //----- general information
+    if (var=="TITLE") return FRIENDLY_PROJECT_NAME ;
+    if (var=="NOW") {
+        time_t epoch = getTimeNow();
+        strftime(msgbuf, sizeof msgbuf, "%d.%m.%Y %H:%M:%S", localtime(&epoch));
+        return String(msgbuf);
+    }
     if (var=="LASTCLEAR") {
         strftime(msgbuf, sizeof msgbuf, "%d.%m.%Y %H:%M:%S", localtime(&t_last_clear));
         return String(msgbuf);
@@ -616,14 +616,6 @@ String processor(const String& var)
         time_t t_elapsed = getTimeNow() - t_last_clear; // in seconds
         tm* te = gmtime(&t_elapsed);
         snprintf(msgbuf,sizeof msgbuf, "%dd %dh %dm", te->tm_yday, te->tm_hour, te->tm_min);
-        return String(msgbuf);
-    }
-
-    //----- general information
-    if (var=="TITLE") return FRIENDLY_PROJECT_NAME ;
-    if (var=="NOW") {
-        time_t epoch = getTimeNow();
-        strftime(msgbuf, sizeof msgbuf, "%d.%m.%Y %H:%M:%S", localtime(&epoch));
         return String(msgbuf);
     }
     //----- the biggie: table of messages vs node id
@@ -667,12 +659,7 @@ static String process( const String& tpl )
     // Route for root / web page
     httpServer.on( "/", HTTP_GET, []() {
         log_i("HTTP '/'");
-        String html = 
-            String(common_header_html) 
-            + String(index_body_html) 
-            + String(common_footer_html);
-        //Serial.println(html);
-        httpServer.send(200, "text/html", process(html));
+        httpServer.send(200, "text/html", process(index_html));
     });
     httpServer.on("/clear", HTTP_GET, [] () {
         log_i("HTTP '/clear'");
@@ -763,7 +750,7 @@ void WiFiEvent(WiFiEvent_t event)
  */
 void presentation()
 {
-	static char rev[] = "$Rev: 1678 $";
+	static char rev[] = "$Rev: 1681 $";
 	char* p = strchr(rev+6,'$');
 	if (p) *p=0;
 
