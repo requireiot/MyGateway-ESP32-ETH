@@ -1,3 +1,10 @@
+#
+# pre-build script to make SVN revision number and platformio env: build type 
+# available as a macro for inclusion in version strings etc.
+#
+# Copyright (C)20204 Bernd Waldmann
+#
+
 import subprocess,os,datetime
 
 try:
@@ -7,9 +14,13 @@ try:
         .decode("utf-8")
     )
 except subprocess.CalledProcessError:
-    exit()
+    revision = ""
 
 print("'-DSVN_REV=\"%s\"'" % revision)
+
+Import("env")
+pioenv = env['PIOENV']
+print("Building ",pioenv)
 
 VERSION_HEADER = 'Revision.h'
 
@@ -18,8 +29,11 @@ HEADER_FILE = """
     #ifndef SVN_REV
         #define SVN_REV "{}"
     #endif
+    #ifndef PIO_ENV
+        #define PIO_ENV "{}"
+    #endif
     // last checked {}
-    """.format(str(revision),datetime.datetime.now())
+    """.format(str(revision),str(pioenv),datetime.datetime.now())
 
 if os.environ.get('PLATFORMIO_INCLUDE_DIR') is not None:
     VERSION_HEADER = os.environ.get('PLATFORMIO_INCLUDE_DIR') + os.sep + VERSION_HEADER

@@ -6,7 +6,7 @@
  * Created		: 03-Oct-2024
  * Tabsize		: 4
  * 
- * This Revision: $Id: main.cpp 1681 2024-11-24 15:59:07Z  $
+ * This Revision: $Id: main.cpp 1684 2024-11-27 11:09:46Z  $
  */
 
 /*
@@ -143,7 +143,7 @@
 #define MY_MQTT_PUBLISH_TOPIC_PREFIX "my/E/stat"
 #define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "my/cmnd"
 
-#define VERSION "$Id: main.cpp 1681 2024-11-24 15:59:07Z  $ "
+#define VERSION "$Id: main.cpp 1684 2024-11-27 11:09:46Z  $ "
 
 #ifdef LED_BUILTIN
  #define LED_INIT   pinMode(LED_BUILTIN,OUTPUT);
@@ -169,8 +169,6 @@
 const unsigned long MIN_REPORT_INTERVAL = 60 MINUTES;
 /// time between temperature measurements
 const unsigned long REPORT_TEMPERATURE_INTERVAL = 30 MINUTES;
-/// time between keepalive messages
-const unsigned long REPORT_HELLO_INTERVAL = 5 MINUTES;
 
 //---------------------------------------------------------------------
 #pragma endregion
@@ -750,12 +748,19 @@ void WiFiEvent(WiFiEvent_t event)
  */
 void presentation()
 {
-	static char rev[] = "$Rev: 1681 $";
+	static char rev[] = "$Rev: 1684 $";
 	char* p = strchr(rev+6,'$');
 	if (p) *p=0;
 
 	// Present locally attached sensors here
-	sendSketchInfo( "MyGwESP32-ETH", rev+6 );
+	sendSketchInfo( 
+        "MyGwESP32-ETH-"
+    #ifdef OPERATE_AS_GATEWAY
+        "Gateway"
+    #else
+        "Repeater"
+    #endif
+        , rev+6 );
 	//              				    1...5...10...15...20...25 max payload
 	//				                    |   |    |    |    |    |
 	present(SENSOR_ID_ARC, S_CUSTOM, F("ARC stats (JSON)") );
@@ -1025,7 +1030,8 @@ void setup()
 
     syslog.logf(LOG_NOTICE,"Starting %s, reset reason '%s'", 
         FRIENDLY_PROJECT_NAME, reset_reasons[rtc_reset_reason] );
-	syslog.log(LOG_NOTICE, VERSION " " SVN_REV " compiled " __DATE__ " " __TIME__ );
+	syslog.logf(LOG_NOTICE, "env:%s svn:%s ver:%s compiled:%s",
+         PIO_ENV, SVN_REV, VERSION, __DATE__ " " __TIME__ );
 	syslog.log(LOG_NOTICE, sNetwork );
     syslog.log( LOG_NOTICE, sConfig );
     snprintf( msgbuf, sizeof msgbuf, 
@@ -1097,15 +1103,6 @@ void loop()
 	if ((unsigned long)(t_now - t_lastTemperatureReport) > REPORT_TEMPERATURE_INTERVAL) {
 		t_lastTemperatureReport=t_now;
         reportTemperature();
-    }
-#endif
-
-#ifdef OPERATE_AS_REPEATER
-	static unsigned long t_lastHelloReport=0;
-	if ((unsigned long)(t_now - t_lastHelloReport) > REPORT_HELLO_INTERVAL) {
-		t_lastHelloReport=t_now;
-        send(msgHello.set((uint32_t)t_now));
-        Serial.println(reportArcStatistics());
     }
 #endif
 
